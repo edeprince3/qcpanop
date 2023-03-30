@@ -31,6 +31,8 @@ class gth_pseudopotential_parameters():
         imax: list of maximum i value for all centers (nonlocal)
         rl: list of rl values for all centers (nonlocal)
         hgth: list of h matrices for all centers (nonlocal)
+        projectors_cli: list of cli parameters for projectors for all centers (nonlocal)
+        projectors_cxli: list of cxli parameters for projectors for all centers (nonlocal)
 
         """
 
@@ -82,6 +84,52 @@ class gth_pseudopotential_parameters():
                 for i in range (0,3):
                     for j in range (0,3):
                         self.hgth[l, i, j] = my_h[i, j]
+
+        # cli and cxli
+        self.projectors_cli = np.zeros((3, 3),dtype='float64') # lmax = 3; imax = 3
+        self.projectors_cxli = np.zeros((3, 3, 3),dtype='float64') # lmax = 3; imax = 3
+
+        pi_54 = np.pi**(5.0/4.0)
+        rl_32 = np.sqrt(self.rl[0]**3)
+        rl_52 = np.sqrt(self.rl[1]**5)
+        rl_72 = np.sqrt(self.rl[2]**7)
+
+        self.projectors_cli[0, 0] = pi_54 * rl_32 * 4.0 * np.sqrt(2.0)
+        self.projectors_cli[0, 1] = pi_54 * rl_32 * 8.0 * np.sqrt(2.0/15.0)
+        self.projectors_cli[0, 2] = pi_54 * rl_32 * 16.0/3.0 * np.sqrt(2.0/105.0)
+        self.projectors_cli[1, 0] = pi_54 * rl_52 * 8.0 * np.sqrt(1.0/3.0)
+        self.projectors_cli[1, 1] = pi_54 * rl_52 * 16.0 * np.sqrt(1.0/105.0)
+        self.projectors_cli[1, 2] = pi_54 * rl_52 * 32.0/3.0 * np.sqrt(1.0/1155.0)
+        self.projectors_cli[2, 0] = pi_54 * rl_72 * 8.0 * np.sqrt(2.0/15.0)
+        self.projectors_cli[2, 1] = pi_54 * rl_72 * 16.0/3.0 * np.sqrt(2.0/105.0)
+        self.projectors_cli[2, 2] = pi_54 * rl_72 * 32.0/3.0 * np.sqrt(2.0/15015.0)
+
+        self.projectors_cxli[0, 0, 0] = 1.0
+
+        self.projectors_cxli[0, 0, 1] = 3.0
+        self.projectors_cxli[1, 0, 1] = -1.0
+
+        self.projectors_cxli[0, 0, 2] = 15.0
+        self.projectors_cxli[1, 0, 2] = -10.0
+        self.projectors_cxli[2, 0, 2] = 1.0
+
+        self.projectors_cxli[0, 1, 0] = 1.0
+
+        self.projectors_cxli[0, 1, 1] = 5.0
+        self.projectors_cxli[1, 1, 1] = -1.0
+
+        self.projectors_cxli[0, 1, 2] = 35.0
+        self.projectors_cxli[1, 1, 2] = -14.0
+        self.projectors_cxli[2, 1, 2] = 1.0
+
+        self.projectors_cxli[0, 2, 0] = 1.0
+
+        self.projectors_cxli[0, 2, 1] = 7.0
+        self.projectors_cxli[1, 2, 1] = -1.0
+
+        self.projectors_cxli[0, 2, 2] = 63.0
+        self.projectors_cxli[1, 2, 2] = -18.0
+        self.projectors_cxli[2, 2, 2] = 1.0
 
 def get_gth_pseudopotential_parameters(cell):
 
@@ -169,7 +217,7 @@ def get_spherical_harmonics_and_projectors_gth(gv, gth_params):
     :param gv: plane wave basis functions plus kpt
     :param gth_params: GTH pseudopotential parameters
     :return spherical_harmonics: spherical harmonics in plane wave basis for k-point
-    :return projectors_li: projectors for GTH pseudopotential in plane wave basis for k-point
+    :return projector_li: projectors for GTH pseudopotential in plane wave basis for k-point
     :return legendre: legendre polynomials 
     """
 
@@ -196,7 +244,7 @@ def get_spherical_harmonics_and_projectors_gth(gv, gth_params):
 
     # projectors should be center-dependent
     projector_li = np.zeros((natom, lmax, imax, gmax),dtype='complex128')
-
+    new_projector_li = np.zeros((natom, lmax, imax, gmax),dtype='complex128')
 
     for center in range (0,natom) :
 
@@ -208,7 +256,39 @@ def get_spherical_harmonics_and_projectors_gth(gv, gth_params):
 
             legendre.append( scipy.special.legendre(l) )
 
+    for center in range (0,natom) :
+
+        for l in range(lmax):
+            for i in range(imax):
+                pass
+                new_projector_li[center, l, i, :] = get_projector_li(rgv, l, i, gth_params[center])
+               
+    print(np.linalg.norm(projector_li - new_projector_li))
+
     return spherical_harmonics_lm, projector_li, legendre
+
+def get_projector_li(rG, l, i, gth_params):
+    """
+
+    Construct projectors for GTH pseudopotential
+
+    :param rG: radial part of plane wave basis functions plus kpt
+    :param l: angular momentum label for projector p_li
+    :param i: i label for projector p_li
+    :param gth_params: GTH pseudopotential parameters
+    :return projector_li: projectors for GTH pseudopotential in plane wave basis for k-point
+    """
+
+    projectors_li = np.zeros((len(rG)), dtype='complex128')
+
+    rl = gth_params.rl[l]
+    cli = gth_params.projectors_cli
+    cxli = gth_params.projectors_cxli
+
+    for x in range (0, i+1):
+        projectors_li[:] += cxli[x, l, i] * (rl*rG)**(2*x)
+
+    return projectors_li * rG**l * cli[l, i] * np.exp(-0.5 * (rl*rG)**2)
 
 def get_nonlocal_pseudopotential_gth(SI, sphg, pg, gind, gth_params, omega):
 
@@ -304,7 +384,6 @@ def get_nonlocal_pseudopotential_gth_legendre(SI, legendre, pg, gind, gth_params
         vsg += tmp_vsg * SI[center][gind] * SI[center][:].conj()
 
     return vsg / omega
-
 
 def get_nonlocal_pseudopotential_matrix_elements(basis, kid, use_legendre = False):
 
