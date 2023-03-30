@@ -13,14 +13,76 @@ libxc_functional = pylibxc.LibXCFunctional("lda_x", "polarized")
 import numpy as np
 import scipy
 
-from pw_pbc.diis import DIIS
+from qcpanop.pw_pbc.diis import DIIS
 
-from pw_pbc.pseudopotential import get_local_pseudopotential_gth
-from pw_pbc.pseudopotential import get_nonlocal_pseudopotential_matrix_elements
+from qcpanop.pw_pbc.pseudopotential import get_local_pseudopotential_gth
+from qcpanop.pw_pbc.pseudopotential import get_nonlocal_pseudopotential_matrix_elements
 
-from pw_pbc.basis import get_miller_indices
+from qcpanop.pw_pbc.basis import get_miller_indices
 
 from pyscf.pbc import tools
+
+def get_exact_exchange_energy_with_k(basis, occupied_orbitals, N):
+    """
+
+    evaluate the exact Hartree-Fock exchange energy, according to
+
+        Ex = - 2 pi / Omega sum_{mn in occ} sum_{k1, k2} sum_{g} |C^{k1k2}_{mn}(g)|^2 / |g|^2
+
+    where
+
+        C^{k1k2}_{mn}(g) = FT[ phi_{m, k1}(r) phi_{n, k2}*(r) ]
+
+    see JCP 108, 4697 (1998) for more details.
+
+    :param basis: plane wave basis information
+    :param occupied_orbitals: a list of occupied orbitals for each k-point
+    :param N: the number of electrons
+
+    :return exchange_energy: the exact Hartree-Fock exchange energy
+    :return exchange_potential: the exact Hartree-Fock exchange potential
+
+    """
+
+
+    # accumulate exchange energy and matrix
+    exchange_energy = 0.0
+
+    Cij = np.zeros(len(basis.g), dtype = 'complex128')
+
+    mat = np.zeros((N,N), dtype = 'complex128')
+
+    for k1 in range (0, len(basis.kpts)):
+
+        for k2 in range (0, len(basis.kpts)):
+
+            for i in range(0, N):
+
+                # Ki(r) = sum_j Kij(r) phi_j(r)
+                Ki_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
+
+                for j in range(0, N):
+
+                    # Cij(r') = phi_i(r') phi_j*(r')
+                    tmp = occupied_orbitals[k2][j].conj() * occupied_orbitals[k1][i]
+
+                    # Cij(g) = FFT[Cij(r')]
+                    tmp = np.fft.ifftn(tmp)
+                    for myg in range( len(basis.g) ):
+                        Cij[myg] = tmp[ get_miller_indices(myg, basis) ]
+
+                    # Kij(g) = Cij(g) * FFT[1/|r-r'|]
+                    Kij = np.divide(Cij, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
+
+                    junk = np.sum(Cij, where = basis.g2 == 0.0)
+                    print('where g2 is zero', junk)
+                    junk = np.sum(Cij, where = basis.g2 != 0.0)
+                    print('where g2 is not zero', junk)
+
+                    print(np.linalg.norm(Cij), np.linalg.norm(Kij), np.linalg.norm(basis.g2))
+                    exchange_energy += np.sum( Cij.conj() * Kij )
+
+    return -2.0 * np.pi / basis.omega /  len(basis.kpts)**2 * exchange_energy
 
 def get_exact_exchange_energy(basis, occupied_orbitals, N, C):
     """
@@ -38,7 +100,7 @@ def get_exact_exchange_energy(basis, occupied_orbitals, N, C):
     :param basis: plane wave basis information
     :param occupied_orbitals: a list of occupied orbitals
     :param N: the number of electrons
-    :param N: the MO transformation matrix
+    :param C: the MO transformation matrix
 
     :return exchange_energy: the exact Hartree-Fock exchange energy
     :return exchange_potential: the exact Hartree-Fock exchange potential
@@ -326,7 +388,7 @@ def get_density(basis, C, N, kid):
 
     occupied_orbitals = []
     rho = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
-    for pp in range(N):
+    for pp in range(0, N):
 
         occ = np.zeros(basis.real_space_grid_dim,dtype = 'complex128')
 
@@ -339,6 +401,20 @@ def get_density(basis, C, N, kid):
         occupied_orbitals.append( occ )
 
         rho += np.absolute(occ)**2.0 / basis.omega
+
+    # again, but with first excited state
+    #occupied_orbitals = []
+    #for pp in range(1, N + 1):
+
+    #    occ = np.zeros(basis.real_space_grid_dim,dtype = 'complex128')
+
+    #    for tt in range( basis.n_plane_waves_per_k[kid] ):
+
+    #        ik = basis.kg_to_g[kid][tt]
+    #        occ[ get_miller_indices(ik, basis) ] = C[tt, pp]
+
+    #    occ = np.fft.fftn(occ) 
+    #    occupied_orbitals.append( occ )
 
     return ( 1.0 / len(basis.kpts) ) * rho, occupied_orbitals
 
@@ -480,7 +556,7 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
     exchange_matrix_beta = np.zeros((basis.n_plane_waves_per_k[0], basis.n_plane_waves_per_k[0]), dtype='complex128')
 
     # maximum number of iterations
-    maxiter = 100
+    maxiter = 200
 
     # density in reciprocal space
     rhog = np.zeros(len(basis.g), dtype = 'complex128')
@@ -543,12 +619,16 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
     print("    ==> Begin UKS Iterations <==")
     print("")
 
+    n = total_charge / basis.omega
+    print("omega: %20.12f" % ( basis.omega ) )
+    print("UEG exchange: %20.12f" % (-0.75 * np.sqrt(6.0/np.pi) * 2.0 * (0.5 * n )**(4.0/3.0) / n * total_charge ) )
+    #exit()
+
     print("    %5s %20s %20s %20s %10s" % ('iter', 'energy', '|dE|', '|drho|', 'Nelec'))
 
     old_total_energy = 0.0
 
     scf_iter = 0
-
 
     # begin UKS iterations
     for i in range(0, maxiter):
@@ -563,8 +643,10 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
         coulomb_energy = 0.0
 
         if xc == 'lda' :
-            va = v_coulomb + v_ne + v_xc_alpha
-            vb = v_coulomb + v_ne + v_xc_beta
+            #va = v_coulomb + v_ne + v_xc_alpha
+            #vb = v_coulomb + v_ne + v_xc_beta
+            va = v_coulomb + v_xc_alpha
+            vb = v_coulomb + v_xc_beta
         elif xc == 'hf' :
             va = v_coulomb + v_ne 
             vb = v_coulomb + v_ne 
@@ -573,6 +655,9 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
 
         Calpha = np.eye(basis.n_plane_waves_per_k[0])
         Cbeta = np.eye(basis.n_plane_waves_per_k[0])
+
+        occ_alpha_per_k = []
+        occ_beta_per_k = []
 
         # loop over k-points
         for kid in range( len(basis.kpts) ):
@@ -617,6 +702,9 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
             rho, occ_alpha = get_density(basis, Calpha, nalpha, kid)
             new_rho_alpha += rho
 
+            # keep orbitals for this k-point
+            occ_alpha_per_k.append(occ_alpha)
+
             # now beta
             if nbeta == 0 : 
                 continue
@@ -643,6 +731,8 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
             rho, occ_beta = get_density(basis, Cbeta, nbeta, kid)
             new_rho_beta += rho
 
+            # keep orbitals for this k-point
+            occ_beta_per_k.append(occ_beta)
 
         if xc == 'lda':
 
@@ -657,6 +747,12 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
                 xc_energy += my_xc_energy
 
             xc_energy -= 0.5 * (nalpha + nbeta) * madelung
+
+        # test exchange energy involving multiple k-points
+        #exchange_energy = get_exact_exchange_energy_with_k(basis, occ_alpha_per_k, nalpha)
+        #if nbeta > 0:
+        #    exchange_energy += get_exact_exchange_energy_with_k(basis, occ_beta_per_k, nbeta)
+        #print('hi there!', exchange_energy, -0.5 * (nalpha + nbeta) * madelung)
 
         # damp density
         factor = 1.0
@@ -723,6 +819,13 @@ def uks(cell, basis, xc = 'lda', guess_mix = True):
         print("    %5i %20.12lf %20.12lf %20.12lf %10.6lf" %  ( scf_iter, new_total_energy, energy_diff, rho_diff_norm, charge ) )
 
         if ( rho_diff_norm < 1e-4 and energy_diff < 1e-5 ) :
+
+            # test exchange energy involving multiple k-points
+            exchange_energy = get_exact_exchange_energy_with_k(basis, occ_alpha_per_k, nalpha)
+            if nbeta > 0:
+                exchange_energy += get_exact_exchange_energy_with_k(basis, occ_beta_per_k, nbeta)
+            print('hi there!', exchange_energy, -0.5 * (nalpha + nbeta) * madelung)
+
             break
 
         scf_iter += 1

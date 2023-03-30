@@ -9,29 +9,30 @@ import ase
 from ase.build import bulk
 import pyscf.pbc.tools.pyscf_ase as pyscf_ase
 
+import numpy as np
 
 def main():
 
     # define unit cell 
     
-    #a = np.eye(3) * 4.0
-    #atom = 'He 0 0 0'
+    a = np.eye(3) * 4.0
+    atom = 'He 0 0 0'
 
     #ase_atom = bulk('Si', 'diamond', a = 10.26)
-    ase_atom = bulk('C', 'diamond', a = 6.74)
+    #ase_atom = bulk('C', 'diamond', a = 6.74)
     #ase_atom = bulk('H', 'diamond', a = 8.88)
     #ase_atom = bulk('Ne', 'diamond', a = 10.26)
 
-    atom = pyscf_ase.ase_atoms_to_pyscf(ase_atom)
-    a = ase_atom.cell 
+    #atom = pyscf_ase.ase_atoms_to_pyscf(ase_atom)
+    #a = ase_atom.cell 
     
     cell = gto.M(a = a,
                  atom = atom,
                  unit = 'bohr',
-                 basis = 'cc-pvqz',
-                 pseudo = 'gth-blyp',
+                 basis = 'cc-pvdz',
+                 #pseudo = 'gth-blyp',
                  verbose = 100,
-                 ke_cutoff = 5000 / 27.21138602,
+                 ke_cutoff = 500 / 27.21138602,
                  precision = 1.0e-8,
                  charge = 0,
                  spin = 0,
@@ -41,8 +42,8 @@ def main():
 
     # get plane wave basis information
     basis = plane_wave_basis(cell, 
-                             ke_cutoff = 1000.0 / 27.21138602, 
-                             n_kpts = [1, 1, 1],
+                             ke_cutoff = 500.0 / 27.21138602, 
+                             n_kpts = [1], #, 1, 1],
                              nl_pp_use_legendre = True)
 
     # run pyscf dft
