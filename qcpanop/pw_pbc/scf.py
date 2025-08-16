@@ -9,6 +9,7 @@ import pylibxc
 
 # TODO: this dictionary is incomplete and shouldn't be global
 functional_name_dict = {
+    'hf' : [None, None],
     'lda' : ['lda_x', None],
     'pbe' : ['gga_x_pbe', 'gga_c_pbe']
 } 
@@ -99,6 +100,24 @@ def get_exact_exchange_energy(basis, occupied_orbitals, N, C):
     #exchange_matrix = np.einsum('pi,ij,qj->pq', trans.conj(), mat, trans)
 
 
+    # precompute indices
+
+    # FFT grid shape
+    grid_shape = basis.real_space_grid_dim  # e.g., (nx, ny, nz)
+    
+    # Precompute: for each compact G index `myg`, find its flat index in FFT grid ordering
+    flat_idx = np.empty(len(basis.g), dtype=np.int64)
+    for myg in range(len(basis.g)):
+        ix, iy, iz = get_miller_indices(myg, basis)
+        flat_idx[myg] = np.ravel_multi_index((ix, iy, iz), grid_shape)
+
+    # precompute FFT[1/|r-r'|/g2]
+    inv_g2 = np.zeros_like(basis.g2)
+    mask = basis.g2 != 0.0
+    inv_g2[mask] = 1.0 / basis.g2[mask]
+
+    Kij_G = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
+
     # try new way ...
     exchange_matrix = np.zeros((basis.n_plane_waves_per_k[0], basis.n_plane_waves_per_k[0]), dtype='complex128')
 
@@ -112,28 +131,32 @@ def get_exact_exchange_energy(basis, occupied_orbitals, N, C):
         phi_i = np.zeros(len(basis.g), dtype = 'complex128')
         phi_i[ii] = 1.0
         tmp = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-        for myg in range( len(basis.g) ):
-            tmp[ get_miller_indices(myg, basis) ] = phi_i[myg]
+        #for myg in range( len(basis.g) ):
+        #    tmp[ get_miller_indices(myg, basis) ] = phi_i[myg]
+        tmp.ravel()[flat_idx] = phi_i
         phi_i = np.fft.fftn(tmp)
 
         for j in range(0, N):
 
             # Cij(r') = phi_i(r') phi_j*(r')
-            tmp = occupied_orbitals[j].conj() * phi_i #occupied_orbitals[i]
+            #tmp = occupied_orbitals[j].conj() * phi_i #occupied_orbitals[i]
 
             # Cij(g) = FFT[Cij(r')]
-            tmp = np.fft.ifftn(tmp)
-            for myg in range( len(basis.g) ):
-                Cij[myg] = tmp[ get_miller_indices(myg, basis) ]
+            tmp = np.fft.ifftn(occupied_orbitals[j].conj() * phi_i)
+            Cij = tmp.ravel()[flat_idx]
+            #for myg in range( len(basis.g) ):
+            #    Cij[myg] = tmp[ get_miller_indices(myg, basis) ]
 
             # Kij(g) = Cij(g) * FFT[1/|r-r'|]
-            Kij = np.divide(Cij, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
+            #Kij = np.divide(Cij, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
+            #Kij = Cij * inv_g2
 
             # Kij(r) = FFT^-1[Kij(g)]
-            Kij_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-            for myg in range( len(basis.g) ):
-                Kij_r[ get_miller_indices(myg, basis) ] = Kij[myg]
-            Kij_r = np.fft.fftn(Kij_r)
+            #Kij_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
+            Kij_G.ravel()[flat_idx] = Cij * inv_g2 #Kij
+            #for myg in range( len(basis.g) ):
+            #    Kij_r[ get_miller_indices(myg, basis) ] = Kij[myg]
+            Kij_r = np.fft.fftn(Kij_G)
 
             # action of K on an occupied orbital, i: 
             # Ki(r) = sum_j Kij(r) phi_j(r)
@@ -1065,6 +1088,9 @@ def uks_energy(cell, basis, Calpha, Cbeta, xc = 'lda'):
         v_ne = get_nuclear_electronic_potential(cell, basis, valence_charges = valence_charges)
     else :
         v_ne = get_local_pseudopotential_gth(basis)
+
+    # jellium!
+    #v_ne *= 0.0
 
     # madelung correction
     madelung = tools.pbc.madelung(cell, basis.kpts)
