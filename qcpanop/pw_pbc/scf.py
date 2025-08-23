@@ -1089,9 +1089,6 @@ def uks_energy(cell, basis, Calpha, Cbeta, xc = 'lda'):
     else :
         v_ne = get_local_pseudopotential_gth(basis)
 
-    # jellium!
-    #v_ne *= 0.0
-
     # madelung correction
     madelung = tools.pbc.madelung(cell, basis.kpts)
 
