@@ -49,60 +49,6 @@ def get_exact_exchange_energy(basis, occupied_orbitals, N, C, exchange_matrix, c
 
     """
 
-
-    # accumulate exchange energy and matrix
-    exchange_energy = 0.0
-
-    Cij = np.zeros(len(basis.g), dtype = 'complex128')
-
-    mat = np.zeros((N,N), dtype = 'complex128')
-
-    for i in range(0, N):
-
-        # Ki(r) = sum_j Kij(r) phi_j(r)
-        Ki_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-
-        for j in range(0, N):
-
-            # Cij(r') = phi_i(r') phi_j*(r')
-            tmp = occupied_orbitals[j].conj() * occupied_orbitals[i]
-
-            # Cij(g) = FFT[Cij(r')]
-            tmp = np.fft.ifftn(tmp)
-            for myg in range( len(basis.g) ):
-                Cij[myg] = tmp[ get_miller_indices(myg, basis) ]
-
-            # Kij(g) = Cij(g) * FFT[1/|r-r'|]
-            Kij = np.divide(Cij, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
-
-            exchange_energy += np.sum( Cij.conj() * Kij )
-
-    if not compute_exchange_matrix :
-        return -2.0 * np.pi / basis.omega * exchange_energy, exchange_matrix
-
-    #        # Kij(r) = FFT^-1[Kij(g)]
-    #        Kij_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-    #        for myg in range( len(basis.g) ):
-    #            Kij_r[ get_miller_indices(myg, basis) ] = Kij[myg]
-    #        Kij_r = np.fft.fftn(Kij_r)
-
-    #        # action of K on an occupied orbital, i: 
-    #        # Ki(r) = sum_j Kij(r) phi_j(r)
-    #        Ki_r += Kij_r * occupied_orbitals[j]
-
-    #    # build exchange matrix in MO basis <phi_k | K | phi_i>
-    #    factor = ( basis.omega / ( basis.real_space_grid_dim[0] * basis.real_space_grid_dim[1] * basis.real_space_grid_dim[2] ) )
-    #    for k in range(0, N):
-    #        mat[k, i] = factor * np.sum( Ki_r * occupied_orbitals[k].conj() ) 
-
-    ## transform exchange matrix back from MO basis
-    #trans = np.zeros((basis.n_plane_waves_per_k[0], N), dtype = 'complex128')
-    #for i in range(0, N):
-    #    trans[:, i] = C[:, i]
-    #    
-    #exchange_matrix = np.einsum('pi,ij,qj->pq', trans.conj(), mat, trans)
-
-
     # precompute indices
 
     # FFT grid shape
@@ -119,11 +65,28 @@ def get_exact_exchange_energy(basis, occupied_orbitals, N, C, exchange_matrix, c
     mask = basis.g2 != 0.0
     inv_g2[mask] = 1.0 / basis.g2[mask]
 
+    # accumulate exchange energy and matrix
+    exchange_energy = 0.0
+
+    for i in range(0, N):
+        for j in range(0, N):
+
+            # Cij(r') = phi_i(r') phi_j*(r')
+            # Cij(g) = FFT[Cij(r')]
+            tmp = np.fft.ifftn(occupied_orbitals[j].conj() * occupied_orbitals[i])
+            Cij = tmp.ravel()[flat_idx]
+
+            # Kij(g) = Cij(g) * FFT[1/|r-r'|]
+            Kij = Cij * inv_g2
+
+            exchange_energy += np.sum( Cij.conj() * Kij )
+
+    if not compute_exchange_matrix :
+        return -2.0 * np.pi / basis.omega * exchange_energy, exchange_matrix
+
+    # build exchange matrix in planewave basis
+
     Kij_G = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-
-    # try new way ...
-    #exchange_matrix = np.zeros((basis.n_plane_waves_per_k[0], basis.n_plane_waves_per_k[0]), dtype='complex128')
-
     for i in range(0, basis.n_plane_waves_per_k[0]):
         ii = basis.kg_to_g[0][i]
 
@@ -142,23 +105,14 @@ def get_exact_exchange_energy(basis, occupied_orbitals, N, C, exchange_matrix, c
         for j in range(0, N):
 
             # Cij(r') = phi_i(r') phi_j*(r')
-            #tmp = occupied_orbitals[j].conj() * phi_i #occupied_orbitals[i]
-
             # Cij(g) = FFT[Cij(r')]
             tmp = np.fft.ifftn(occupied_orbitals[j].conj() * phi_i)
             Cij = tmp.ravel()[flat_idx]
-            #for myg in range( len(basis.g) ):
-            #    Cij[myg] = tmp[ get_miller_indices(myg, basis) ]
 
             # Kij(g) = Cij(g) * FFT[1/|r-r'|]
-            #Kij = np.divide(Cij, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
-            #Kij = Cij * inv_g2
+            Kij_G.ravel()[flat_idx] = Cij * inv_g2 #Kij
 
             # Kij(r) = FFT^-1[Kij(g)]
-            #Kij_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-            Kij_G.ravel()[flat_idx] = Cij * inv_g2 #Kij
-            #for myg in range( len(basis.g) ):
-            #    Kij_r[ get_miller_indices(myg, basis) ] = Kij[myg]
             Kij_r = np.fft.fftn(Kij_G)
 
             # action of K on an occupied orbital, i: 
@@ -977,6 +931,7 @@ def uks(cell, basis,
 
         else :
 
+            # we'll deal with hf exchange below
             pass
 
         # total energy
@@ -997,6 +952,9 @@ def uks(cell, basis,
             break
 
         elif ( conv < d_convergence and energy_diff < e_convergence and not recompute_exchange) :
+
+            if xc != 'hf':
+                break
 
             # update exchange matrix for next set of inner iterations
 
