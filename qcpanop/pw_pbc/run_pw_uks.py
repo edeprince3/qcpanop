@@ -21,6 +21,7 @@ def main():
 
     #ase_atom = bulk('Si', 'diamond', a = 10.26)
     ase_atom = bulk('C', 'diamond', a = 6.74)
+    #ase_atom = bulk('He', 'diamond', a = 4.0)
     #ase_atom = bulk('H', 'diamond', a = 8.88)
     #ase_atom = bulk('Ne', 'diamond', a = 10.26)
 
@@ -31,25 +32,36 @@ def main():
                  atom = atom,
                  unit = 'bohr',
                  basis = 'cc-pvdz',
-                 pseudo = 'gth-blyp',
+                 pseudo = 'gth-pbe',
                  #verbose = 100,
-                 #ke_cutoff = 500 / 27.21138602,
+                 #ke_cutoff = 1000 / 27.21138602,
                  precision = 1.0e-8,
-                 #charge = 0,
-                 spin = 1,
+                 charge = 0,
+                 spin = 0,
                  dimension = 3)
-    
+
     cell.build()
 
-    cutoff = 1000.0
+    cutoff = 1000.0 
 
     # get plane wave basis information
     basis = plane_wave_basis(cell, 
         ke_cutoff = cutoff / 27.21138602, 
         n_kpts = [1, 1, 1])
 
+    #mf = dft.UKS(cell) #, kpts=cell.make_kpts([1, 1, 1]))
+    #mf.xc = 'lda'
+    #energy = mf.kernel()
+    #print(energy)
+
     # run plane wave scf 
-    en = uks(cell, basis, xc = 'pbe', guess_mix = True)
+    en, ca, cb = uks(cell, basis, xc = 'pbe', guess_mix = True)
+
+    # C / diamond / pbe / gth-pbe / 1000 ev cutoff
+    assert np.isclose(en, -10.281221451484)
+
+    # hf / 300 ev cutoff
+    #assert np.isclose(en, -10.453404153698)
 
 if __name__ == "__main__":
     main()
