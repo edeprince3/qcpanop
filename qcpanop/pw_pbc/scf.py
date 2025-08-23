@@ -337,10 +337,8 @@ def get_xc_potential(xc, basis, rho_alpha, rho_beta, libxc_x_functional, libxc_c
 
     else :
 
-        pass
-
         # TODO: fix for general k
-        #xc_energy, v_xc = get_exact_exchange_energy(basis, occupied_orbitals, N, C)
+        xc_energy, v_xc = get_exact_exchange_energy(basis, occupied_orbitals, N, C)
 
     return v_xc_alpha, v_xc_beta
 
@@ -726,6 +724,7 @@ def uks(cell, basis,
 
     # density in reciprocal space
     rhog = np.zeros(len(basis.g), dtype = 'complex128')
+    inner_rhog = np.zeros(len(basis.g), dtype = 'complex128')
 
     # charges
     valence_charges = cell.atom_charges()
@@ -802,216 +801,249 @@ def uks(cell, basis,
         Calpha.append(np.eye(basis.n_plane_waves_per_k[kid]))
         Cbeta.append(np.eye(basis.n_plane_waves_per_k[kid]))
 
+    # outer diis extrapolates density
     from pyscf import lib
-    adiis = lib.diis.DIIS()
-    adiis.space = diis_dimension
+    outer_diis = lib.diis.DIIS()
+    outer_diis.space = diis_dimension
 
-    # begin UKS iterations
-    scf_iter = 0 # initialize variable incase maxiter = 0
-    one_electron_energy = 0.0
-    coulomb_energy = 0.0
+    # inner diis extrapolates fock matrix
+    #inner_diis = lib.diis.DIIS()
+    #inner_diis.space = diis_dimension
+
     xc_energy = 0.0
-    for scf_iter in range(maxiter):
+    for outer_scf_iter in range (maxiter):
 
-        occ_alpha = []
-        occ_beta = []
+        # inner diis extrapolates fock matrix
+        inner_diis = lib.diis.DIIS()
+        inner_diis.space = diis_dimension
 
+        # begin UKS iterations
+        scf_iter = 0 # initialize variable incase maxiter = 0
         one_electron_energy = 0.0
         coulomb_energy = 0.0
 
+        for scf_iter in range(maxiter):
+
+            occ_alpha = []
+            occ_beta = []
+
+            one_electron_energy = 0.0
+            coulomb_energy = 0.0
+
+            if xc != 'hf' :
+                va = v_coulomb + v_ne + v_xc_alpha
+                vb = v_coulomb + v_ne + v_xc_beta
+            else :
+                va = v_coulomb + v_ne 
+                vb = v_coulomb + v_ne 
+
+            # zero density for this iteration
+            rho = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+
+            # form fock matrix and orbital gradient
+
+            fock_a = []
+            fock_b = []
+            grad_a = []
+            grad_b = []
+
+            for kid in range ( len(basis.kpts) ):
+                fock_a.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
+                fock_b.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
+                grad_a.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
+                grad_b.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
+
+            # damping factor
+            damp = 1.0
+            if outer_scf_iter == 0 and scf_iter < diis_start_cycle and damp_fock : 
+                damp = damping_factor
+
+            # loop over k-points
+            for kid in range( len(basis.kpts) ):
+
+                # form fock matrix
+                fock_a[kid] = form_fock_matrix(basis, kid, v = va)
+                fock_b[kid] = form_fock_matrix(basis, kid, v = vb)
+
+                # exact exchange?
+                if xc == 'hf' :
+                    fock_a += exchange_matrix_alpha
+                    fock_b += exchange_matrix_beta
+
+                # damp fock matrix
+                fock_a[kid] = damp * fock_a[kid] + (1.0 - damp) * old_fock_a[kid]
+                fock_b[kid] = damp * fock_b[kid] + (1.0 - damp) * old_fock_b[kid]
+                old_fock_a[kid] = fock_a[kid].copy()
+                old_fock_b[kid] = fock_b[kid].copy()
+
+                # form opdm and orbital gradient (for diis)
+                grad_a[kid] = form_orbital_gradient(basis, Calpha[kid], nalpha, fock_a[kid], kid)
+                grad_b[kid] = form_orbital_gradient(basis, Cbeta[kid], nbeta, fock_b[kid], kid)
+
+            # extrapolate fock matrix
+
+            # solution vector is fock matrix
+            solution_vector = np.zeros(0)
+            for kid in range ( len(basis.kpts) ):
+                solution_vector = np.hstack( (solution_vector, fock_a[kid].flatten(), fock_b[kid].flatten() ) )
+
+            # error vector is orbital gradient
+            error_vector = np.zeros(0)
+            for kid in range ( len(basis.kpts) ):
+                error_vector = np.hstack( (error_vector, grad_a[kid].flatten(), grad_b[kid].flatten() ) )
+
+            # norm of orbital gradient
+            conv = np.linalg.norm(error_vector)
+
+            # extrapolate solution vector
+            new_solution_vector = inner_diis.update(solution_vector, error_vector)
+
+            # reshape solution vector
+            off = 0
+            for kid in range ( len(basis.kpts) ):
+                dim = basis.n_plane_waves_per_k[kid]
+                fock_a[kid] = new_solution_vector[off:off+dim*dim].reshape(fock_a[kid].shape)
+                off += dim*dim
+                fock_b[kid] = new_solution_vector[off:off+dim*dim].reshape(fock_b[kid].shape)
+                off += dim*dim
+
+            one_electron_energy = 0.0
+            coulomb_energy = 0.0
+
+            rho_a = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+            rho_b = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+
+            # diagonalize extrapolated fock matrix
+            for kid in range ( len(basis.kpts) ):
+
+                n = nalpha - 1
+                if scf_iter == 0 and guess_mix == True :
+                    n = nalpha
+
+                epsilon_alpha, Calpha[kid] = scipy.linalg.eigh(fock_a[kid], eigvals=(0, n))
+                epsilon_beta, Cbeta[kid] = scipy.linalg.eigh(fock_b[kid], eigvals=(0, (nbeta-1)))
+
+                #epsilon_alpha, Calpha = np.linalg.eigh(fock_a)
+                #epsilon_beta, Cbeta = np.linalg.eigh(fock_b)
+
+                # break spin symmetry?
+                if guess_mix is True and scf_iter == 0:
+
+                    c = np.cos(0.25 * np.pi)
+                    s = np.sin(0.25 * np.pi)
+
+                    tmp1 = c * Calpha[kid][:, nalpha-1] - s * Calpha[kid][:, nalpha]
+                    tmp2 = s * Calpha[kid][:, nalpha-1] + c * Calpha[kid][:, nalpha]
+
+                    Calpha[kid][:, nalpha-1] = tmp1
+                    Calpha[kid][:, nalpha] = tmp2
+
+                # update density
+                my_rho_a, occ_alpha = get_density(basis, Calpha[kid], nalpha, kid)
+                my_rho_b, occ_beta = get_density(basis, Cbeta[kid], nbeta, kid)
+
+                # density should be non-negative ...
+                rho_a += my_rho_a.clip(min = 0)
+                rho_b += my_rho_b.clip(min = 0)
+
+                # one-electron part of the energy (alpha)
+                one_electron_energy += get_one_electron_energy(basis, 
+                                                               Calpha[kid], 
+                                                               nalpha, 
+                                                               kid, 
+                                                               v_ne = v_ne)
+
+                # one-electron part of the energy (beta)
+                one_electron_energy += get_one_electron_energy(basis, 
+                                                               Cbeta[kid], 
+                                                               nbeta, 
+                                                               kid, 
+                                                               v_ne = v_ne)
+
+                # coulomb part of the energy: 1/2 J
+                coulomb_energy += get_coulomb_energy(basis, Calpha[kid], nalpha, kid, v_coulomb)
+
+                # coulomb part of the energy: 1/2 J
+                coulomb_energy += get_coulomb_energy(basis, Cbeta[kid], nbeta, kid, v_coulomb)
+
+            rho = rho_a + rho_b
+
+            if xc != 'hf':
+
+                xc_energy = get_xc_energy(xc, basis, rho_a, rho_b, libxc_x_functional, libxc_c_functional)
+
+            else :
+
+                # TODO: fix for general k
+                pass
+                #xc_energy, v_xc = get_exact_exchange_energy(basis, occ_alpha, nalpha, Calpha)
+                #if nbeta > 0:
+                #    my_xc_energy, v_xc = get_exact_exchange_energy(basis, occ_beta, nbeta, Cbeta)
+                #    xc_energy += my_xc_energy
+
+                #xc_energy -= 0.5 * (nalpha + nbeta) * madelung
+
+            # coulomb potential
+            tmp = np.fft.ifftn(rho)
+            for myg in range( len(basis.g) ):
+                inner_rhog[myg] = tmp[ get_miller_indices(myg, basis) ]
+
+            v_coulomb = 4.0 * np.pi * np.divide(inner_rhog, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
+
+            # exchange-correlation potential
+            if xc != 'hf' :
+
+                v_xc_alpha, v_xc_beta = get_xc_potential(xc, basis, rho_a, rho_b, libxc_x_functional, libxc_c_functional)
+
+            else :
+
+                pass
+                #dum, exchange_matrix_alpha = get_exact_exchange_energy(basis, occ_alpha, nalpha, Calpha)
+                #if nbeta > 0:
+                #    dum, exchange_matrix_beta = get_exact_exchange_energy(basis, occ_beta, nbeta, Cbeta)
+
+            # total energy
+            new_total_energy = np.real(one_electron_energy) + np.real(coulomb_energy) + np.real(xc_energy) + enuc
+
+            # convergence in energy
+            energy_diff = np.abs(new_total_energy - old_total_energy)
+
+            # update energy
+            old_total_energy = new_total_energy
+
+            # charge
+            charge = ( basis.omega / ( basis.real_space_grid_dim[0] * basis.real_space_grid_dim[1] * basis.real_space_grid_dim[2] ) ) * np.sum(np.absolute(rho))
+
+            print("    %5i %5i %20.12lf %20.12lf %20.12lf %10.6lf" %  ( outer_scf_iter, scf_iter, new_total_energy, energy_diff, conv, charge ) )
+
+            if ( conv < d_convergence and energy_diff < e_convergence ) :
+                break
+
         if xc != 'hf' :
-            va = v_coulomb + v_ne + v_xc_alpha
-            vb = v_coulomb + v_ne + v_xc_beta
-        else :
-            va = v_coulomb + v_ne 
-            vb = v_coulomb + v_ne 
-
-        # zero density for this iteration
-        rho = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
-
-        # form each block of the fock matrix and orbital gradient
-        damp = 1.0
-        if scf_iter > 0 and scf_iter < 1 * diis_start_cycle :
-            damp = damping_factor
-
-        # form fock matrix and orbital gradient
-
-        fock_a = []
-        fock_b = []
-        grad_a = []
-        grad_b = []
-
-        for kid in range ( len(basis.kpts) ):
-            fock_a.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
-            fock_b.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
-            grad_a.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
-            grad_b.append(np.zeros((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), dtype = 'complex128'))
-
-        # damping factor
-        damp = 1.0
-        if scf_iter < diis_start_cycle and damp_fock : 
-            damp = damping_factor
-
-        # loop over k-points
-        for kid in range( len(basis.kpts) ):
-
-            # form fock matrix
-            fock_a[kid] = form_fock_matrix(basis, kid, v = va)
-            fock_b[kid] = form_fock_matrix(basis, kid, v = vb)
-
-            # exact exchange?
-            if xc == 'hf' :
-                fock_a += exchange_matrix_alpha
-                fock_b += exchange_matrix_beta
-
-            # damp fock matrix
-            fock_a[kid] = damp * fock_a[kid] + (1.0 - damp) * old_fock_a[kid]
-            fock_b[kid] = damp * fock_b[kid] + (1.0 - damp) * old_fock_b[kid]
-            old_fock_a[kid] = fock_a[kid].copy()
-            old_fock_b[kid] = fock_b[kid].copy()
-
-            # form opdm and orbital gradient (for diis)
-            grad_a[kid] = form_orbital_gradient(basis, Calpha[kid], nalpha, fock_a[kid], kid)
-            grad_b[kid] = form_orbital_gradient(basis, Cbeta[kid], nbeta, fock_b[kid], kid)
-
-        # extrapolate fock matrix
-
-        # solution vector is fock matrix
-        solution_vector = np.zeros(0)
-        for kid in range ( len(basis.kpts) ):
-            solution_vector = np.hstack( (solution_vector, fock_a[kid].flatten(), fock_b[kid].flatten() ) )
-
-        # error vector is orbital gradient
-        error_vector = np.zeros(0)
-        for kid in range ( len(basis.kpts) ):
-            error_vector = np.hstack( (error_vector, grad_a[kid].flatten(), grad_b[kid].flatten() ) )
-
-        # norm of orbital gradient
-        conv = np.linalg.norm(error_vector)
-
-        # extrapolate solution vector
-        new_solution_vector = adiis.update(solution_vector, error_vector)
-
-        # reshape solution vector
-        off = 0
-        for kid in range ( len(basis.kpts) ):
-            dim = basis.n_plane_waves_per_k[kid]
-            fock_a[kid] = new_solution_vector[off:off+dim*dim].reshape(fock_a[kid].shape)
-            off += dim*dim
-            fock_b[kid] = new_solution_vector[off:off+dim*dim].reshape(fock_b[kid].shape)
-            off += dim*dim
-
-        one_electron_energy = 0.0
-        coulomb_energy = 0.0
-
-        rho_a = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
-        rho_b = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
-
-        # diagonalize extrapolated fock matrix
-        for kid in range ( len(basis.kpts) ):
-
-            n = nalpha - 1
-            if scf_iter == 0 and guess_mix == True :
-                n = nalpha
-
-            epsilon_alpha, Calpha[kid] = scipy.linalg.eigh(fock_a[kid], eigvals=(0, n))
-            epsilon_beta, Cbeta[kid] = scipy.linalg.eigh(fock_b[kid], eigvals=(0, (nbeta-1)))
-
-            #epsilon_alpha, Calpha = np.linalg.eigh(fock_a)
-            #epsilon_beta, Cbeta = np.linalg.eigh(fock_b)
-
-            # break spin symmetry?
-            if guess_mix is True and scf_iter == 0:
-
-                c = np.cos(0.25 * np.pi)
-                s = np.sin(0.25 * np.pi)
-
-                tmp1 = c * Calpha[kid][:, nalpha-1] - s * Calpha[kid][:, nalpha]
-                tmp2 = s * Calpha[kid][:, nalpha-1] + c * Calpha[kid][:, nalpha]
-
-                Calpha[kid][:, nalpha-1] = tmp1
-                Calpha[kid][:, nalpha] = tmp2
-
-            # update density
-            my_rho_a, occ_alpha = get_density(basis, Calpha[kid], nalpha, kid)
-            my_rho_b, occ_beta = get_density(basis, Cbeta[kid], nbeta, kid)
-
-            # density should be non-negative ...
-            rho_a += my_rho_a.clip(min = 0)
-            rho_b += my_rho_b.clip(min = 0)
-
-            # one-electron part of the energy (alpha)
-            one_electron_energy += get_one_electron_energy(basis, 
-                                                           Calpha[kid], 
-                                                           nalpha, 
-                                                           kid, 
-                                                           v_ne = v_ne)
-
-            # one-electron part of the energy (beta)
-            one_electron_energy += get_one_electron_energy(basis, 
-                                                           Cbeta[kid], 
-                                                           nbeta, 
-                                                           kid, 
-                                                           v_ne = v_ne)
-
-            # coulomb part of the energy: 1/2 J
-            coulomb_energy += get_coulomb_energy(basis, Calpha[kid], nalpha, kid, v_coulomb)
-
-            # coulomb part of the energy: 1/2 J
-            coulomb_energy += get_coulomb_energy(basis, Cbeta[kid], nbeta, kid, v_coulomb)
-
-        rho = rho_a + rho_b
-
-        if xc != 'hf':
-
-            xc_energy = get_xc_energy(xc, basis, rho_a, rho_b, libxc_x_functional, libxc_c_functional)
-
-        else :
-
-            # TODO: fix for general k
-            xc_energy, v_xc = get_exact_exchange_energy(basis, occ_alpha, nalpha, Calpha)
-            if nbeta > 0:
-                my_xc_energy, v_xc = get_exact_exchange_energy(basis, occ_beta, nbeta, Cbeta)
-                xc_energy += my_xc_energy
-
-            xc_energy -= 0.5 * (nalpha + nbeta) * madelung
-
-        # coulomb potential
-        tmp = np.fft.ifftn(rho)
-        for myg in range( len(basis.g) ):
-            rhog[myg] = tmp[ get_miller_indices(myg, basis) ]
-
-        v_coulomb = 4.0 * np.pi * np.divide(rhog, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
-
-        # exchange-correlation potential
-        if xc != 'hf' :
-
-            v_xc_alpha, v_xc_beta = get_xc_potential(xc, basis, rho_a, rho_b, libxc_x_functional, libxc_c_functional)
-
-        else :
-
-            dum, exchange_matrix_alpha = get_exact_exchange_energy(basis, occ_alpha, nalpha, Calpha)
-            if nbeta > 0:
-                dum, exchange_matrix_beta = get_exact_exchange_energy(basis, occ_beta, nbeta, Cbeta)
-
-        # total energy
-        new_total_energy = np.real(one_electron_energy) + np.real(coulomb_energy) + np.real(xc_energy) + enuc
-
-        # convergence in energy
-        energy_diff = np.abs(new_total_energy - old_total_energy)
-
-        # update energy
-        old_total_energy = new_total_energy
-
-        # charge
-        charge = ( basis.omega / ( basis.real_space_grid_dim[0] * basis.real_space_grid_dim[1] * basis.real_space_grid_dim[2] ) ) * np.sum(np.absolute(rho))
-
-        print("    %5i %20.12lf %20.12lf %20.12lf %10.6lf" %  ( scf_iter, new_total_energy, energy_diff, conv, charge ) )
-
-        if ( conv < d_convergence and energy_diff < e_convergence ) :
             break
 
-    if scf_iter == maxiter - 1:
+        # extrapolate density in outer iterations
+        diff_rhog = inner_rhog - rhog
+
+        # TODO: add outer iteration energy convergence check
+        if ( np.linalg.norm(diff_rhog) < d_convergence):
+            break
+
+        # update outer density
+        rhog = outer_diis.update(inner_rhog, diff_rhog)
+
+        # update coulomb potential for next set of inner iterations
+        v_coulomb = 4.0 * np.pi * np.divide(rhog, basis.g2, out = np.zeros_like(basis.g2), where = basis.g2 != 0.0)
+
+        # update exchange energy and exchange matrix for next set of inner iterations
+        # TODO: fix for general k
+        xc_energy, exchange_matrix_alpha = get_exact_exchange_energy(basis, occ_alpha, nalpha, Calpha)
+        if nbeta > 0:
+            my_xc_energy, exchange_matrix_beta = get_exact_exchange_energy(basis, occ_beta, nbeta, Cbeta)
+            xc_energy += my_xc_energy
+        xc_energy -= 0.5 * (nalpha + nbeta) * madelung
+
+    if scf_iter == maxiter - 1 or outer_scf_iter == maxiter - 1 :
         print('')
         print('    UKS iterations did not converge.')
         print('')
@@ -1019,6 +1051,7 @@ def uks(cell, basis,
         print('')
         print('    UKS iterations converged!')
         print('')
+
 
     print('    ==> energy components <==')
     print('')
