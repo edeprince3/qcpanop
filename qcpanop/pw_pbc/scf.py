@@ -398,113 +398,33 @@ def get_density(basis, C, ne, kid):
 
     return ( 1.0 / len(basis.kpts) ) * rho, phi_r
 
-def fock_on_orbitals(basis, kid, ne, phi_r, C, T, v_r, xc, jellium):
+def build_ace_operator(basis, kid, ne, C, phi_r):
     """
-    evaluate action of fock matrix on orbitals and build ace operator
+    build ace operator
 
     :param basis: the plane wave basis object
     :param kid: the current k-point
     :param ne: number of electrons
-    :param phi_r: orbitals, in real space
     :param C: orbitals, in reciprocal space
-    :param T: diagonal of the kinetic energy matrix, in reciprocal space
-    :param v_r: the potential (coulomb + local pseudopotential + xc), in real space
-    :param xc: the exchange-correlation functional
-    :param jellium: is this jellium? should we worry about the pseudopotential?
+    :param phi_r: orbitals, in real space
 
-    :return F_c: the action of the fock matrix on the orbials
+    :return B_ace: the B matrix for ACE
     :return Ki: exchange operator acting on orbitals, i, in reciprocal space
-    :return exchange: the exchange matrix
     """
 
     Kij_G = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
     Ki = np.zeros((basis.n_plane_waves_per_k[kid], ne), dtype='complex128')
-    F_c = np.zeros((basis.n_plane_waves_per_k[kid], ne), dtype='complex128')
     exchange = np.zeros((basis.n_plane_waves_per_k[kid], ne), dtype='complex128')
     for i in range (ne):
 
         # exchange
         Ki_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-        if xc == 'hf':
-            for j in range(0, ne):
 
-                # Cij(r') = phi_i(r') phi_j*(r')
-                # Cij(g) = FFT[Cij(r')]
-                tmp = np.fft.ifftn(phi_r[j].conj() * phi_r[i])
-                Cij = tmp.ravel()[basis.flat_idx]
-
-                # Kij(g) = Cij(g) * FFT[1/|r-r'|]
-                Kij_G[:] = 0.0
-                Kij_G.ravel()[basis.flat_idx] = Cij * basis.inv_g2 #Kij
-
-                # Kij(r) = FFT^-1[Kij(g)]
-                Kij_r = np.fft.fftn(Kij_G)
-
-                # action of K on an occupied orbital, i: 
-                # Ki(r) = sum_j Kij(r) phi_j(r)
-                Ki_r += Kij_r * phi_r[j]
-
-            Ki_r *= -4.0 * np.pi / basis.omega
-
-        # action of potential on orbitals in real space, then transform to reciprocal space
-        tmp_vphi = v_r * phi_r[i] #+ Ki_r # real space, 3d
-        tmp_vphi = np.fft.ifftn(tmp_vphi) # reciprocal space, 3d
-        tmp_vphi = tmp_vphi.ravel()[basis.flat_idx] # reciprocal space, large flattened basis
-
-        F_c[:,i] = T[kid] * C[kid][:, i] + tmp_vphi[basis.kg_to_g[kid]] # map last term to small flattened basis
-
-        # for ace
-        tmp_Ki = Ki_r.copy() # real space, 3d
-        tmp_Ki = np.fft.ifftn(tmp_Ki) # reciprocal space, 3d
-        tmp_Ki = tmp_Ki.ravel()[basis.flat_idx] # reciprocal space, large flattened basis
-        Ki[:,i] = tmp_Ki[basis.kg_to_g[kid]] # reciprocal space, small flattened basis
-
-        # non-ace exchange
-        tmp_exch = Ki_r.copy() # real space, 3d
-        tmp_exch = np.fft.ifftn(tmp_exch) # reciprocal space, 3d
-        tmp_exch = tmp_exch.ravel()[basis.flat_idx] # reciprocal space, large flattened basis
-        exchange[:,i] = tmp_exch[basis.kg_to_g[kid]] # map last term to small flattened basis
-
-    if not jellium and basis.use_pseudopotential: 
-        F_c += nonlocal_pseudopotential_on_orbitals(basis, kid, C[kid])
-
-    return F_c, Ki, exchange
-
-def fock_on_orbitals_using_ace(basis, kid, ne, phi_r, c, T, v_r, xc, Ki, B_ace, ace_exchange, jellium):
-    """
-    apply fock operator to a set of orbitals using the ace operator
-
-    :param basis: the plane wave basis object
-    :param kid: the current k-point
-    :param ne: number of electrons
-    :param phi_r: orbitals, in real space
-    :param C: orbitals, in reciprocal space
-    :param T: diagonal of the kinetic energy matrix, in reciprocal space
-    :param v_r: the potential (coulomb + local pseudopotential + xc), in real space
-    :param xc: the exchange-correlation functional
-    :param Ki: exchange operator acting on orbitals, i, in reciprocal space
-    :param B: ACE B matrix
-    :param ace_exchange: do use the ace operator for exchange?
-    :param jellium: is this jellium? should we worry about the pseudopotential?
-
-    :return F @ c: action of fock operator on the orbitals in reciprococal space
-    """
-
-    # orbital in real space
-    current_phi = np.zeros([np.prod(basis.real_space_grid_dim), c.shape[1]], dtype=np.complex128) # lobpcg
-    current_phi[basis.grid_idx_k[kid]] = c
-    current_phi = current_phi.reshape(basis.real_space_grid_dim)
-    current_phi = np.fft.fftn(current_phi) 
-
-    # exchange
-    Kij_G = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-    Ki_r = np.zeros(basis.real_space_grid_dim, dtype = 'complex128')
-    if xc == 'hf' and not ace_exchange:
         for j in range(0, ne):
 
             # Cij(r') = phi_i(r') phi_j*(r')
             # Cij(g) = FFT[Cij(r')]
-            tmp = np.fft.ifftn(phi_r[j].conj() * current_phi)
+            tmp = np.fft.ifftn(phi_r[j].conj() * phi_r[i])
             Cij = tmp.ravel()[basis.flat_idx]
 
             # Kij(g) = Cij(g) * FFT[1/|r-r'|]
@@ -520,6 +440,72 @@ def fock_on_orbitals_using_ace(basis, kid, ne, phi_r, c, T, v_r, xc, Ki, B_ace, 
 
         Ki_r *= -4.0 * np.pi / basis.omega
 
+        # for ace
+        tmp_Ki = Ki_r.copy() # real space, 3d
+        tmp_Ki = np.fft.ifftn(tmp_Ki) # reciprocal space, 3d
+        tmp_Ki = tmp_Ki.ravel()[basis.flat_idx] # reciprocal space, large flattened basis
+        Ki[:,i] = tmp_Ki[basis.kg_to_g[kid]] # reciprocal space, small flattened basis
+
+        # non-ace exchange
+        tmp_exch = Ki_r.copy() # real space, 3d
+        tmp_exch = np.fft.ifftn(tmp_exch) # reciprocal space, 3d
+        tmp_exch = tmp_exch.ravel()[basis.flat_idx] # reciprocal space, large flattened basis
+        exchange[:,i] = tmp_exch[basis.kg_to_g[kid]] # map last term to small flattened basis
+
+    # now, build B operator
+    # see text after Eq. 13 of J. Chem. Theory Comput. 12, 2242-2249 (2016).
+
+    # for ace < phi_i | Kj>^{-1}
+    tmp = -C[kid].conj().T @ Ki
+    L = np.linalg.cholesky(tmp)
+
+    # how's our cholesky decomposition looking?
+    assert (np.allclose(tmp, L @ L.conj().T))
+
+    Linv = np.linalg.inv(L)
+    B_ace = -Linv.conj().T @ Linv
+
+    # how's our inverse looking?
+    assert (np.allclose(-tmp @ B_ace, np.eye(tmp.shape[0])))
+
+    # test ACE representation of exchange
+
+    # (< phi_j | K) | c >
+    tmp = Ki.conj().T @ C[kid]
+    # sum_j B_{ij} < phi_j | K | c > 
+    tmp = B_ace @ tmp
+    # sum_i K | phi_i >  B_{ij} < phi_j | K | c >
+    ace = Ki @ tmp
+
+    assert (np.allclose(ace, exchange))
+
+    return B_ace, Ki
+
+def fock_on_orbital(basis, kid, ne, phi_r, c, T, v_r, xc, Ki, B_ace, jellium):
+    """
+    apply fock operator to an orbital (using the ace operator for exchange)
+
+    :param basis: the plane wave basis object
+    :param kid: the current k-point
+    :param ne: number of electrons
+    :param phi_r: orbitals, in real space
+    :param C: orbitals, in reciprocal space
+    :param T: diagonal of the kinetic energy matrix, in reciprocal space
+    :param v_r: the potential (coulomb + local pseudopotential + xc), in real space
+    :param xc: the exchange-correlation functional
+    :param Ki: exchange operator acting on orbitals, i, in reciprocal space
+    :param B: ACE B matrix
+    :param jellium: is this jellium? should we worry about the pseudopotential?
+
+    :return F @ c: action of fock operator on the orbitals in reciprococal space
+    """
+
+    # orbital in real space
+    current_phi = np.zeros([np.prod(basis.real_space_grid_dim), c.shape[1]], dtype=np.complex128) # lobpcg
+    current_phi[basis.grid_idx_k[kid]] = c
+    current_phi = current_phi.reshape(basis.real_space_grid_dim)
+    current_phi = np.fft.fftn(current_phi) 
+
     # action of potential on orbitals in real space, then transform to reciprocal space
     tmp_vphi = v_r * current_phi  # real space, 3d
     tmp_vphi = np.fft.ifftn(tmp_vphi) # reciprocal space, 3d
@@ -533,27 +519,17 @@ def fock_on_orbitals_using_ace(basis, kid, ne, phi_r, c, T, v_r, xc, Ki, B_ace, 
     if not jellium and basis.use_pseudopotential: 
         F_c += nonlocal_pseudopotential_on_orbitals(basis, kid, c)
 
+    # exact exchange with ace
     if xc == 'hf':
-        if ace_exchange :
+        # (< phi_j | K) | c >
+        tmp = Ki.conj().T @ c
+        # sum_j B_{ij} < phi_j | K | c > 
+        tmp = B_ace @ tmp 
+        # sum_i K | phi_i >  B_{ij} < phi_j | K | c >
+        ace = Ki @ tmp 
 
-            # (< phi_j | K) | c >
-            tmp = Ki.conj().T @ c
-            # sum_j B_{ij} < phi_j | K | c > 
-            tmp = B_ace @ tmp 
-            # sum_i K | phi_i >  B_{ij} < phi_j | K | c >
-            ace = Ki @ tmp 
-
-            F_c += ace
+        F_c += ace
  
-        else :
-
-            tmp_exch = Ki_r # real space, 3d
-            tmp_exch = np.fft.ifftn(tmp_exch) # reciprocal space, 3d
-            tmp_exch = tmp_exch.ravel()[basis.flat_idx] # reciprocal space, large flattened basis
-            tmp_exch = tmp_exch[basis.kg_to_g[kid]] # reciprocal space, small flattened basis
-            tmp_exch = tmp_exch.reshape(c.shape) # for lobpcg
-            F_c += tmp_exch
-
     return F_c
 
 def build_B_ace(ne, C, Ki, exchange):
@@ -655,7 +631,6 @@ def uks(cell, basis,
         e_convergence = 1e-8, 
         d_convergence = 1e-6, 
         diis_dimension = 8, 
-        ace_exchange = True,
         jellium = False,
         jellium_ne = 2,
         maxiter=500,
@@ -892,23 +867,27 @@ def uks(cell, basis,
             # compute local potentials
             v_coulomb, v_alpha_r, v_beta_r = compute_local_potentials(rho_alpha, rho_beta, v_ne, basis, xc, libxc_x_functional, libxc_c_functional, jellium)
 
+        # build ace operator for exact exchange
+        if xc == 'hf':
+            B_alpha_ace[kid], Ki_alpha[kid] = build_ace_operator(basis, kid, nalpha, Calpha, phi_alpha)
+            B_beta_ace[kid], Ki_beta[kid] = build_ace_operator(basis, kid, nbeta, Cbeta, phi_beta)
+
         # evaluate the orbital gradient
         error_vector = np.zeros(0)
         for kid in range( len(basis.kpts) ):
 
-            Fa_c, Ki_alpha[kid], exchange_alpha = fock_on_orbitals(basis, kid, nalpha, phi_alpha, Calpha, T, v_alpha_r, xc, jellium)
-            Fb_c, Ki_beta[kid], exchange_beta = fock_on_orbitals(basis, kid, nbeta, phi_beta, Cbeta, T, v_beta_r, xc, jellium)
+            Fa_c = np.zeros_like(Calpha[kid])
+            for i in range (nalpha):
+                c = Calpha[kid][:, i][:, None]
+                Fa_c[:, i]  = fock_on_orbital(basis, kid, nalpha, phi_alpha, c, T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)[:, 0]
 
-            if xc == 'hf':
+            Fb_c = np.zeros_like(Cbeta[kid])
+            for i in range (nbeta):
+                c = Cbeta[kid][:, i][:, np.newaxis]
+                Fb_c[:, i] = fock_on_orbital(basis, kid, nbeta, phi_beta, c, T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)[:, 0]
 
-                B_alpha_ace[kid] = build_B_ace(nalpha, Calpha[kid], Ki_alpha[kid], exchange_alpha)
-                B_beta_ace[kid] = build_B_ace(nbeta, Cbeta[kid], Ki_beta[kid], exchange_beta)
-
-                Fa_c += exchange_alpha
-                Fb_c += exchange_beta
-            
-            #grad_a = Fa_c - epsilon_alpha[kid][np.newaxis, :] * Calpha[kid]
-            #grad_b = Fb_c - epsilon_beta[kid][np.newaxis, :] * Cbeta[kid]
+            grad_a = Fa_c - epsilon_alpha[kid][np.newaxis, :] * Calpha[kid]
+            grad_b = Fb_c - epsilon_beta[kid][np.newaxis, :] * Cbeta[kid]
 
             c_Fa_c = Calpha[kid].conj().T @ Fa_c
             c_Fb_c = Cbeta[kid].conj().T @ Fb_c
@@ -942,10 +921,10 @@ def uks(cell, basis,
         for kid in range ( len(basis.kpts) ):
 
             def lobpcg_alpha(c):
-                return fock_on_orbitals_using_ace(basis, kid, nalpha, phi_alpha, c, T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], ace_exchange, jellium)
+                return fock_on_orbital(basis, kid, nalpha, phi_alpha, c, T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)
 
             def lobpcg_beta(c):
-                return fock_on_orbitals_using_ace(basis, kid, nbeta, phi_beta, c, T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], ace_exchange, jellium)
+                return fock_on_orbital(basis, kid, nbeta, phi_beta, c, T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)
 
             Fa_C = LinearOperator((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), matvec=lobpcg_alpha, dtype='complex128')
             Fb_C = LinearOperator((basis.n_plane_waves_per_k[kid], basis.n_plane_waves_per_k[kid]), matvec=lobpcg_beta, dtype='complex128')

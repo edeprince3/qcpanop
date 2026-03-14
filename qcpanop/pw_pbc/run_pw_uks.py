@@ -45,16 +45,16 @@ def main():
         n_kpts = [1, 1, 1])
 
     # run plane wave scf
-    en, ca, cb = uks(cell, basis, xc = 'pbe', maxiter = 100, ace_exchange = True)
+    en, ca, cb = uks(cell, basis, xc = 'hf', maxiter = 100)
 
     # C / diamond / pbe / gth-pbe / 1000 ev cutoff
-    assert np.isclose(en, -10.281221451484)
+    #assert np.isclose(en, -10.281221451484)
 
     # C / diamond / hf / gth-pbe / 500 ev cutoff
     #assert np.isclose(en, -10.061105991782)
 
     # C / diamond / hf / gth-pbe / 1000 ev cutoff
-    #assert np.isclose(en, -10.236907018105)
+    assert np.isclose(en, -10.236907018105)
 
     # C / diamond / hf / gth-pbe / 2000 ev cutoff
     #assert np.isclose(en, -10.249995429892)
