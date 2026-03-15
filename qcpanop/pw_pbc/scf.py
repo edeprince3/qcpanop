@@ -626,6 +626,41 @@ def compute_local_potentials(rho_alpha, rho_beta, v_ne, basis, xc, libxc_x_funct
 
     return v_coulomb, v_alpha_r, v_beta_r
 
+def pc_diis_error_vector(basis, kid, ne, phi_r, c, c_ref, T, v_r, xc, Ki, B_ace, jellium):
+    """
+    evaluate the error vector for pc-diis
+
+    :param basis: the plane wave basis object
+    :param kid: the current k-point
+    :param ne: number of electrons
+    :param phi_r: orbitals, in real space
+    :param c: orbitals, in reciprocal space
+    :param c_ref: reference orbitals for pc-diis, in reciprocal space
+    :param T: diagonal of the kinetic energy matrix, in reciprocal space
+    :param v_r: the potential (coulomb + local pseudopotential + xc), in real space
+    :param xc: the exchange-correlation functional
+    :param Ki: exchange operator acting on orbitals, i, in reciprocal space
+    :param B: ACE B matrix
+    :param jellium: is this jellium? should we worry about the pseudopotential?
+
+    :return error_vector: pc-diis error vector
+    """
+
+    error_vector = np.zeros(0)
+    for kid in range( len(basis.kpts) ):
+
+        F_c = np.zeros_like(c)
+        for i in range (ne):
+            my_c = c[:, i][:, None]
+            F_c[:, i]  = fock_on_orbital(basis, kid, ne, phi_r, my_c, T, v_r, xc, Ki, B_ace, jellium)[:, 0]
+
+        c_F_c = c.conj().T @ F_c
+        grad = F_c - c @ c_F_c
+
+        error_vector = np.hstack( (error_vector, grad.flatten()) )
+
+    return error_vector
+
 def uks(cell, basis, 
         xc = 'lda', 
         e_convergence = 1e-8, 
@@ -872,29 +907,11 @@ def uks(cell, basis,
             B_alpha_ace[kid], Ki_alpha[kid] = build_ace_operator(basis, kid, nalpha, Calpha, phi_alpha)
             B_beta_ace[kid], Ki_beta[kid] = build_ace_operator(basis, kid, nbeta, Cbeta, phi_beta)
 
-        # evaluate the orbital gradient
-        error_vector = np.zeros(0)
-        for kid in range( len(basis.kpts) ):
+        # evaluate the error vector for pc-diis
+        error_alpha = pc_diis_error_vector(basis, kid, nalpha, phi_alpha, Calpha[kid], T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)
+        error_beta = pc_diis_error_vector(basis, kid, nbeta, phi_beta, Cbeta[kid], T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)
 
-            Fa_c = np.zeros_like(Calpha[kid])
-            for i in range (nalpha):
-                c = Calpha[kid][:, i][:, None]
-                Fa_c[:, i]  = fock_on_orbital(basis, kid, nalpha, phi_alpha, c, T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)[:, 0]
-
-            Fb_c = np.zeros_like(Cbeta[kid])
-            for i in range (nbeta):
-                c = Cbeta[kid][:, i][:, np.newaxis]
-                Fb_c[:, i] = fock_on_orbital(basis, kid, nbeta, phi_beta, c, T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)[:, 0]
-
-            grad_a = Fa_c - epsilon_alpha[kid][np.newaxis, :] * Calpha[kid]
-            grad_b = Fb_c - epsilon_beta[kid][np.newaxis, :] * Cbeta[kid]
-
-            c_Fa_c = Calpha[kid].conj().T @ Fa_c
-            c_Fb_c = Cbeta[kid].conj().T @ Fb_c
-            grad_a = Fa_c - Calpha[kid] @ c_Fa_c
-            grad_b = Fb_c - Cbeta[kid] @ c_Fb_c
-
-            error_vector = np.hstack( (error_vector, grad_a.flatten(), grad_b.flatten() ) )
+        error_vector = np.hstack( (error_alpha, error_beta) )
 
         # norm of the orbital gradient for convergence check
         conv = np.linalg.norm(error_vector)
