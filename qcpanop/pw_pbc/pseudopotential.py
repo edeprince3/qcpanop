@@ -206,7 +206,7 @@ def get_spherical_harmonics_and_projectors_gth(gv, gth_params):
 
         for l in range(lmax):
             for m in range(-l,l+1):
-                spherical_harmonics_lm[l, m+l, :] = scipy.special.sph_harm(m, l, phigv, thetagv)
+                spherical_harmonics_lm[l, m+l, :] = scipy.special.sph_harm_y(m, l, phigv, thetagv)
             for i in range(imax):
                 projector_li[center, l, i, :] = pbcgto.pseudo.pp.projG_li(rgv, l, i, gth_params[center].rl[l])
 
@@ -214,7 +214,6 @@ def get_spherical_harmonics_and_projectors_gth(gv, gth_params):
 
     return spherical_harmonics_lm, projector_li, legendre
 
-#def nonlocal_pseudopotential_on_orbitals(basis, kid, ne, nmo, phi_r, C, T, v_r, xc, occupation_numbers, adiabatic_exchange_lambda):
 def nonlocal_pseudopotential_on_orbitals(basis, kid, c):
 
     """

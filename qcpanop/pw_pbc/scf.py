@@ -153,8 +153,8 @@ def get_xc_potential(xc, basis, rho_alpha, rho_beta, libxc_x_functional, libxc_c
         inp = {
             "rho" : combined_rho,
             "sigma" : contracted_gradient,
-            "lapl" : None,
-            "tau" : None
+            #"lapl" : None,
+            #"tau" : None
         }
 
         tmp_alpha = np.zeros_like(rho_alpha)
@@ -316,8 +316,8 @@ def get_xc_energy(xc, basis, rho_alpha, rho_beta, libxc_x_functional, libxc_c_fu
     inp = {
         "rho" : combined_rho,
         "sigma" : contracted_gradient,
-        "lapl" : None,
-        "tau" : None
+        #"lapl" : None,
+        #"tau" : None
     }
 
     val = np.zeros_like(rho_alpha.flatten())
@@ -654,12 +654,40 @@ def pc_diis_error_vector(basis, kid, ne, phi_r, c, c_ref, T, v_r, xc, Ki, B_ace,
             my_c = c[:, i][:, None]
             F_c[:, i]  = fock_on_orbital(basis, kid, ne, phi_r, my_c, T, v_r, xc, Ki, B_ace, jellium)[:, 0]
 
-        c_F_c = c.conj().T @ F_c
-        grad = F_c - c @ c_F_c
+        # Fc ( c* c_ref ) - c ( (Fc)* c_ref )
+        c_c_ref = c.conj().T @ c_ref
+        F_c_c_ref = F_c.conj().T @ c_ref
+        grad = F_c @ c_c_ref - c @ F_c_c_ref
 
         error_vector = np.hstack( (error_vector, grad.flatten()) )
 
     return error_vector
+
+def extrapolate_density(rho_alpha, rho_beta, error_vector, diis, rho_alpha_shape, rho_beta_shape):
+    """
+    extrapolate the density and re-build potentials
+   
+    :param rho_alpha: alpha-spin density 
+    :param rho_beta: beta-spin density 
+    :param error vector: the error vector
+    :param diis: pyscf diis object
+    :param rho_alpha_shape: shape of rho_alpha
+    :param rho_beta_shape: shape of rho_beta
+
+    :return rho_alpha: extrapolated alpha-spin density
+    :return rho_beta: extrapolated beta-spin density
+    """
+
+    solution_vector = np.hstack( (rho_alpha.flatten(), rho_beta.flatten()) )
+    new_solution_vector = diis.update(solution_vector, error_vector)
+
+    rho_alpha = new_solution_vector[:len(solution_vector)//2].reshape(rho_alpha_shape)
+    rho_beta = new_solution_vector[len(solution_vector)//2:].reshape(rho_beta_shape)
+
+    rho_alpha = rho_alpha.clip(min = 0).real
+    rho_beta = rho_beta.clip(min = 0).real
+
+    return rho_alpha, rho_beta
 
 def uks(cell, basis, 
         xc = 'lda', 
@@ -908,22 +936,19 @@ def uks(cell, basis,
             B_beta_ace[kid], Ki_beta[kid] = build_ace_operator(basis, kid, nbeta, Cbeta, phi_beta)
 
         # evaluate the error vector for pc-diis
-        error_alpha = pc_diis_error_vector(basis, kid, nalpha, phi_alpha, Calpha[kid], T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)
-        error_beta = pc_diis_error_vector(basis, kid, nbeta, phi_beta, Cbeta[kid], T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)
+        C_ref = Calpha[kid]
+        error_alpha = pc_diis_error_vector(basis, kid, nalpha, phi_alpha, Calpha[kid], C_ref, T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)
+
+        C_ref = Cbeta[kid]
+        error_beta = pc_diis_error_vector(basis, kid, nbeta, phi_beta, Cbeta[kid], C_ref, T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)
 
         error_vector = np.hstack( (error_alpha, error_beta) )
 
         # norm of the orbital gradient for convergence check
         conv = np.linalg.norm(error_vector)
 
-        solution_vector = np.hstack( (rho_alpha.flatten(), rho_beta.flatten()) )
-        new_solution_vector = diis.update(solution_vector, error_vector)
-
-        rho_alpha = new_solution_vector[:len(solution_vector)//2].reshape(rho_alpha_old.shape)
-        rho_beta = new_solution_vector[len(solution_vector)//2:].reshape(rho_beta_old.shape)
-
-        rho_alpha = rho_alpha.clip(min = 0).real
-        rho_beta = rho_beta.clip(min = 0).real
+        # extrapolate density
+        rho_alpha, rho_beta = extrapolate_density(rho_alpha, rho_beta, error_vector, diis, rho_alpha_old.shape, rho_beta_old.shape)
 
         # recompute potentials after diis extrapolation
         v_coulomb, v_alpha_r, v_beta_r = compute_local_potentials(rho_alpha, rho_beta, v_ne, basis, xc, libxc_x_functional, libxc_c_functional, jellium)
