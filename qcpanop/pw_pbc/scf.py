@@ -396,7 +396,8 @@ def get_density(basis, C, ne, kid):
 
         rho += np.absolute(phi)**2.0 / basis.omega
 
-    return ( 1.0 / len(basis.kpts) ) * rho, phi_r
+    # return density, which should be non-negative ...
+    return ( 1.0 / len(basis.kpts) ) * rho.clip(min = 0).real, phi_r
 
 def build_ace_operator(basis, kid, ne, C, phi_r):
     """
@@ -663,6 +664,37 @@ def pc_diis_error_vector(basis, kid, ne, phi_r, c, c_ref, T, v_r, xc, Ki, B_ace,
 
     return error_vector
 
+def extrapolate_auxiliary_orbitals(Calpha, Cbeta, Calpha_ref, Cbeta_ref, error_vector, diis):
+    """
+    extrapolate the density and re-build potentials
+   
+    :param Calpha: alpha-spin orbitals 
+    :param Cbeta: beta-spin orbitals 
+    :param Calpha: reference alpha-spin orbitals 
+    :param Cbeta: reference beta-spin orbitals 
+    :param error vector: the error vector
+    :param diis: pyscf diis object
+
+    :return Calpha_aux: extrapolated alpha-spin auxiliary orbitals
+    :return Cbeta_aux: extrapolated beta-spin auxiliary orbitals
+    """
+
+    # build auxiliary orbitals C (C* C_ref)
+    Calpha_aux = Calpha @ Calpha.conj().T @ Calpha_ref
+    Cbeta_aux = Cbeta @ Cbeta.conj().T @ Cbeta_ref
+
+    solution_vector = np.hstack( (Calpha_aux.flatten(), Cbeta_aux.flatten()) )
+    new_solution_vector = diis.update(solution_vector, error_vector)
+
+    Calpha_aux = new_solution_vector[:len(solution_vector)//2].reshape(Calpha.shape)
+    Cbeta_aux = new_solution_vector[len(solution_vector)//2:].reshape(Cbeta.shape)
+
+    # orthonormalize orbitals
+    Calpha_aux = orthonormalize(Calpha_aux)
+    Cbeta_aux = orthonormalize(Cbeta_aux)
+
+    return Calpha_aux, Cbeta_aux
+
 def extrapolate_density(rho_alpha, rho_beta, error_vector, diis, rho_alpha_shape, rho_beta_shape):
     """
     extrapolate the density and re-build potentials
@@ -801,6 +833,12 @@ def uks(cell, basis,
     Calpha = []
     Cbeta = []
 
+    # reference and auxiliary orbitals for pc-diis
+    Calpha_ref = []
+    Cbeta_ref = []
+    Calpha_aux = []
+    Cbeta_aux = []
+
     epsilon_alpha = []
     epsilon_beta = []
 
@@ -831,6 +869,12 @@ def uks(cell, basis,
         Calpha[kid] = orthonormalize(Calpha[kid])
         Cbeta[kid] = orthonormalize(Cbeta[kid])
 
+        # reference and auxiliary orbitals for pc-diis
+        Calpha_ref.append(Calpha[kid])
+        Cbeta_ref.append(Cbeta[kid])
+        Calpha_aux.append(Calpha[kid])
+        Cbeta_aux.append(Cbeta[kid])
+
         B_alpha_ace.append(np.zeros((nalpha, nalpha), dtype='complex128'))
         B_beta_ace.append(np.zeros((nbeta, nbeta), dtype='complex128'))
 
@@ -856,12 +900,8 @@ def uks(cell, basis,
             Cbeta[kid] = Calpha[kid].copy()
 
             # update density
-            my_rho_alpha, phi_alpha = get_density(basis, Calpha[kid], nalpha, kid)
-            my_rho_beta, phi_beta = get_density(basis, Cbeta[kid], nbeta, kid)
-
-            # density should be non-negative ...
-            rho_alpha = my_rho_alpha.clip(min = 0).real
-            rho_beta = my_rho_beta.clip(min = 0).real
+            rho_alpha, phi_alpha = get_density(basis, Calpha[kid], nalpha, kid)
+            rho_beta, phi_beta = get_density(basis, Cbeta[kid], nbeta, kid)
 
             # kinetic energy part of the one-electron energy
             one_electron_energy = np.sum(np.einsum('pi,p->i', np.abs(Calpha[kid])**2, T[kid]))
@@ -870,8 +910,9 @@ def uks(cell, basis,
             # exact exchange energy
             xc_energy = get_exact_exchange_energy(basis, phi_alpha, nalpha, Calpha)
             if nbeta > 0:
-                my_xc_energy = get_exact_exchange_energy(basis, phi_beta, nbeta, Cbeta)
-                xc_energy += my_xc_energy
+                xc_energy += get_exact_exchange_energy(basis, phi_beta, nbeta, Cbeta)
+
+            # total energy
             energy = one_electron_energy + xc_energy - 0.5 * (nalpha + nbeta) * madelung
 
             if print_level > 0:
@@ -916,14 +957,74 @@ def uks(cell, basis,
     one_electron_energy = 0.0
     coulomb_energy = 0.0
 
+    pc_diis_start_iter = 3
+
+    # build initial ace operator for exact exchange
+    if xc == 'hf':
+        for kid in range ( len(basis.kpts) ):
+            B_alpha_ace[kid], Ki_alpha[kid] = build_ace_operator(basis, kid, nalpha, Calpha_aux, phi_alpha)
+            B_beta_ace[kid], Ki_beta[kid] = build_ace_operator(basis, kid, nbeta, Cbeta_aux, phi_beta)
+
+    # build initial local potentials
+    rho_alpha = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+    rho_beta = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+    for kid in range ( len(basis.kpts) ):
+
+        # update density
+        my_rho_alpha, phi_alpha = get_density(basis, Calpha[kid], nalpha, kid)
+        my_rho_beta, phi_beta = get_density(basis, Cbeta[kid], nbeta, kid)
+
+        rho_alpha += my_rho_alpha
+        rho_beta += my_rho_beta
+
     for scf_iter in range(maxiter):
 
         one_electron_energy = 0.0
         coulomb_energy = 0.0
 
-        # damping
+        # set reference orbitals for pc-diis. fixed after a few iterations
+        if scf_iter < pc_diis_start_iter:
+            Calpha_ref[kid] = Calpha[kid]
+            Cbeta_ref[kid] = Cbeta[kid]
+
+        # evaluate the error vector for pc-diis
+        error_alpha = pc_diis_error_vector(basis, kid, nalpha, phi_alpha, Calpha[kid], Calpha_ref[kid], T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)
+        error_beta = pc_diis_error_vector(basis, kid, nbeta, phi_beta, Cbeta[kid], Cbeta_ref[kid], T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)
+
+        error_vector = np.hstack( (error_alpha, error_beta) )
+
+        # norm of the orbital gradient for convergence check
+        conv = np.linalg.norm(error_vector)
+
+        ## extrapolate density
+        #rho_alpha, rho_beta = extrapolate_density(rho_alpha, rho_beta, error_vector, diis, rho_alpha_old.shape, rho_beta_old.shape)
+        ## recompute potentials after diis extrapolation
+        #v_coulomb, v_alpha_r, v_beta_r = compute_local_potentials(rho_alpha, rho_beta, v_ne, basis, xc, libxc_x_functional, libxc_c_functional, jellium)
+
+        # extrapolate auxiliary orbitals
+        if scf_iter >= pc_diis_start_iter:
+            rho_alpha = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+            rho_beta = np.zeros(basis.real_space_grid_dim, dtype = 'float64')
+            for kid in range ( len(basis.kpts) ):
+                Calpha_aux[kid], Cbeta_aux[kid] = extrapolate_auxiliary_orbitals(Calpha[kid], Cbeta[kid], Calpha_ref[kid], Cbeta_ref[kid], error_vector, diis)
+
+                # update density
+                my_rho_alpha, phi_alpha = get_density(basis, Calpha_aux[kid], nalpha, kid)
+                my_rho_beta, phi_beta = get_density(basis, Cbeta_aux[kid], nbeta, kid)
+
+                rho_alpha += my_rho_alpha
+                rho_beta += my_rho_beta
+            
+            # recompute potentials after diis extrapolation
+            v_coulomb, v_alpha_r, v_beta_r = compute_local_potentials(rho_alpha, rho_beta, v_ne, basis, xc, libxc_x_functional, libxc_c_functional, jellium)
+        else:
+            for kid in range ( len(basis.kpts) ):
+                Calpha_aux[kid] = Calpha[kid]
+                Cbeta_aux[kid] = Cbeta[kid]
+
+        # damping until pc-diis starts
         damp = 0.5
-        if scf_iter > 0:
+        if scf_iter > 0 and scf_iter <= pc_diis_start_iter:
             rho_alpha = rho_alpha_old * (1.0 - damp) + rho_alpha * damp
             rho_beta = rho_beta_old * (1.0 - damp) + rho_beta * damp
 
@@ -932,26 +1033,9 @@ def uks(cell, basis,
 
         # build ace operator for exact exchange
         if xc == 'hf':
-            B_alpha_ace[kid], Ki_alpha[kid] = build_ace_operator(basis, kid, nalpha, Calpha, phi_alpha)
-            B_beta_ace[kid], Ki_beta[kid] = build_ace_operator(basis, kid, nbeta, Cbeta, phi_beta)
-
-        # evaluate the error vector for pc-diis
-        C_ref = Calpha[kid]
-        error_alpha = pc_diis_error_vector(basis, kid, nalpha, phi_alpha, Calpha[kid], C_ref, T, v_alpha_r, xc, Ki_alpha[kid], B_alpha_ace[kid], jellium)
-
-        C_ref = Cbeta[kid]
-        error_beta = pc_diis_error_vector(basis, kid, nbeta, phi_beta, Cbeta[kid], C_ref, T, v_beta_r, xc, Ki_beta[kid], B_beta_ace[kid], jellium)
-
-        error_vector = np.hstack( (error_alpha, error_beta) )
-
-        # norm of the orbital gradient for convergence check
-        conv = np.linalg.norm(error_vector)
-
-        # extrapolate density
-        rho_alpha, rho_beta = extrapolate_density(rho_alpha, rho_beta, error_vector, diis, rho_alpha_old.shape, rho_beta_old.shape)
-
-        # recompute potentials after diis extrapolation
-        v_coulomb, v_alpha_r, v_beta_r = compute_local_potentials(rho_alpha, rho_beta, v_ne, basis, xc, libxc_x_functional, libxc_c_functional, jellium)
+            for kid in range ( len(basis.kpts) ):
+                B_alpha_ace[kid], Ki_alpha[kid] = build_ace_operator(basis, kid, nalpha, Calpha_aux, phi_alpha)
+                B_beta_ace[kid], Ki_beta[kid] = build_ace_operator(basis, kid, nbeta, Cbeta_aux, phi_beta)
 
         one_electron_energy = 0.0
         coulomb_energy = 0.0
@@ -978,12 +1062,12 @@ def uks(cell, basis,
                 Cbeta[kid] = Calpha[kid].copy()
                 epsilon_beta[kid] = epsilon_alpha[kid].copy()
 
-            # HF orbitals need to be shifted for smearing to work correctly
+            # HF orbitals need to be shifted for smearing to work correctly ... TODO: remove?
             if xc == 'hf':
                 epsilon_alpha[kid] -= madelung
                 epsilon_beta[kid] -= madelung
 
-            # why do i need to orthonormalize my orbitals???
+            # why do i need to orthonormalize my orbitals??? ... TODO: remove?
             Calpha[kid] = orthonormalize(Calpha[kid])
             Cbeta[kid] = orthonormalize(Cbeta[kid])
             if jellium:
@@ -993,9 +1077,8 @@ def uks(cell, basis,
             my_rho_alpha, phi_alpha = get_density(basis, Calpha[kid], nalpha, kid)
             my_rho_beta, phi_beta = get_density(basis, Cbeta[kid], nbeta, kid)
 
-            # density should be non-negative ...
-            rho_alpha += my_rho_alpha.clip(min = 0).real
-            rho_beta += my_rho_beta.clip(min = 0).real
+            rho_alpha += my_rho_alpha
+            rho_beta += my_rho_beta
 
             # kinetic energy part of the one-electron energy
             one_electron_energy += np.sum(np.einsum('pi,p->i', np.abs(Calpha[kid])**2, T[kid]))
